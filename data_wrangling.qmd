@@ -1,0 +1,177 @@
+---
+title: "data_wrangling"
+author: "Dominik Dianovics"
+format: html
+editor: visual
+---
+
+# R course final project
+
+## Tidy Tuesday: 2023-02-07, Big Tech Stock Prices
+
+This is the final project required for Tamas Nagy's R course, 2025 fall. This file contains the data extraction and wrangling necessary for analyses.
+
+Source of Tidy Tuesday data: https://github.com/rfordatascience/tidytuesday/tree/main/data/2023/2023-02-07
+
+## Load packages
+
+```{r packages}
+#| warning: false
+library(tidyverse)
+library(papaja)
+library(ggplot2)
+```
+
+## Load data
+
+This data includes stock prices for 14 tech companies. Only stock symbols are included, so I will join two datasets to have the full name of the company as well.
+
+```{r data import}
+data_symbol = read.csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/refs/heads/main/data/2023/2023-02-07/big_tech_stock_prices.csv")
+
+data_named = read.csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/refs/heads/main/data/2023/2023-02-07/big_tech_companies.csv")
+```
+
+## Rename data
+
+I join the two datasets here and rename some of the variables for my personal liking.
+
+```{r data rename}
+data_renamed = data_symbol |> 
+  left_join(data_named, by = c("stock_symbol")) |>
+  rename(
+    date = date,
+    market_open = open,
+    market_close = close,
+    final_close = adj_close
+  ) |> 
+  select(company, stock_symbol, date, market_open, market_close, final_close, low, high, volume)
+```
+
+Dataset contains **`r nrow(data_renamed)`** rows for these companies: **`r unique(data_renamed$company)`**.
+
+## Explore data
+
+```{r explore}
+summary(data_renamed)
+```
+
+Dates of stock prices are in character format, so I convert them to Date format.
+
+```{r date fix}
+data_renamed = data_renamed |>
+  mutate(date = as.Date(date))
+
+is.Date(data_renamed$date)
+```
+
+Dates range from `r data_renamed |> summarise(first_date = min(date)) |> pull(first_date)` to `r data_renamed |> summarise(last_date = max(date)) |> pull(last_date)`.
+
+### Overall evaluation of companies
+
+```{r create tables for values}
+stock_summary <- data_renamed |>
+  rename(`Stock` = stock_symbol) |> 
+  group_by(Stock) |>
+  arrange(date, .by_group = TRUE) |>
+  summarise(
+    `First price` = round(first(market_close), 2),
+    `Last price`  = round(last(market_close),2 ),
+    `Total change` = `Last price` - `First price`
+  )
+
+apa_table(
+  stock_summary,
+  caption = "Summary of First and Last Stock Prices",
+  note = "Total change computed as the difference between last and first prices."
+)
+```
+
+All stock prices have increased in the respective 12 years, but some have increased more drastically than others. Let's look at the growth visually.
+
+```{r figure for stock price}
+stock_summary |> 
+  ggplot(aes(x = reorder(Stock, `Total change`), y = `Total change`, fill = `Total change`)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Total change in stock price in 2010-2023",
+       x = "",
+       y = "Total change in stock price ($)") +
+  scale_fill_viridis_c() +
+  theme_apa() +
+  theme(axis.text.x = element_text(angle = 30),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+  
+```
+
+
+This is all fine and dandy, but the stock price increase doesn't take into account inflation. I suspect that when we take into account the purchasing power of the dollar, some stocks will go into negative overall evaluation.
+
+If we take the 2010 US dollar as the default, in 2023, that same dollar would be worth ~$1.40, meaning that a person needs 40% more money in 2023 to have the same wealth as in 2010. I will take this value and incorporate it into the figure, so that, if the stock would follow inflation, it should be be worth that amount and compare that to the actual amount. This next plot shows the last known stock price and the inflation-adjusted price.
+
+```{r figure for stock price plus inflation}
+stock_summary_adjusted = stock_summary |> 
+  mutate(inflation_adjusted_price = `First price` * 1.40)
+
+stock_summary_adjusted |>
+  ggplot(aes(x = reorder(Stock, `Last price`))) +
+  geom_col(aes(y = `Last price`, fill = `Last price`)) +
+  geom_point(aes(y = inflation_adjusted_price), 
+             color = "red", size = 3, shape = 18) +
+  labs(title = "Price of stock in 2023",
+       x = "",
+       y = "Stock price ($)",
+       caption = "Note. Red diamonds indicate the inflation-adjusted first price for each stock.") +
+  scale_fill_viridis_c() +
+  theme_apa() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        axis.title.x = element_blank(),
+        legend.position = "none",
+        plot.caption = element_text(hjust = 0, face = "italic"))
+
+```
+
+This shows the expected value but that is still not perfect, let's remove the expected from the actual values and plot it that way.
+
+```{r figure for stock price plus inflation normalized}
+stock_summary_adjusted_normalized = stock_summary_adjusted |> 
+  mutate(`Real change` = `Last price` - inflation_adjusted_price)
+
+stock_summary_adjusted_normalized |> 
+  ggplot(aes(x = reorder(Stock, `Real change`), y = `Real change`, fill = `Real change`)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Inflation-adjusted change in stock price in 2010-2023",
+       x = "",
+       y = "Real change in stock price ($)") +
+  scale_fill_viridis_c() +
+  theme_apa() +
+  theme(axis.text.x = element_text(angle = 30),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  ylim(-50, NA)
+
+```
+
+Now we see a more accurate picture, IBM's company evaluation actually shrank when adjusted for inflation, Intel's stayed the same.
+
+### Volatility
+
+Volatility is the degree of fluctuations of a stock's evaluation. High volatility means the stock's price is unstable and can change quickly, while low volatility means that the price is stable. Stability can mean that the stock has the same value day-to-day, or that there is a steady downward or upward trend. Let's see how that looks among these companies.
+
+```{r Microsoft volatility}
+#| fig-width: 10
+#| fig-height: 20
+ggplot(data_renamed, aes(x = date)) +
+  geom_line(aes(y = market_open), color = "red") +
+  geom_line(aes(y = market_close), color = "green") +
+  facet_wrap(~ stock_symbol, scales = "free_y", axes = "all_y", ncol = 1) +  # One panel per stock
+  theme_apa() +
+  labs(title = "Stock prices 2010-2023",
+       x = "",
+       y = "Stock price") +
+  theme(axis.text.x = element_text(),
+        axis.text.y = element_text(),
+        legend.position = "none")
+
+```
+
