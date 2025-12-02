@@ -13,13 +13,18 @@ This is the final project required for Tamas Nagy's R course, 2025 fall. This fi
 
 Source of Tidy Tuesday data: https://github.com/rfordatascience/tidytuesday/tree/main/data/2023/2023-02-07
 
-## Load packages
+# Load packages
 
 ```{r packages}
 #| warning: false
 library(tidyverse)
 library(papaja)
 library(ggplot2)
+library(lubridate)
+library(slider)
+library(here)
+
+here::here()
 ```
 
 ## Load data
@@ -32,7 +37,7 @@ data_symbol = read.csv("https://raw.githubusercontent.com/rfordatascience/tidytu
 data_named = read.csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/refs/heads/main/data/2023/2023-02-07/big_tech_companies.csv")
 ```
 
-## Rename data
+# Rename data
 
 I join the two datasets here and rename some of the variables for my personal liking.
 
@@ -50,7 +55,7 @@ data_renamed = data_symbol |>
 
 Dataset contains **`r nrow(data_renamed)`** rows for these companies: **`r unique(data_renamed$company)`**.
 
-## Explore data
+# Explore data
 
 ```{r explore}
 summary(data_renamed)
@@ -67,7 +72,7 @@ is.Date(data_renamed$date)
 
 Dates range from `r data_renamed |> summarise(first_date = min(date)) |> pull(first_date)` to `r data_renamed |> summarise(last_date = max(date)) |> pull(last_date)`.
 
-### Overall evaluation of companies
+## Overall evaluation of companies
 
 ```{r create tables for values}
 stock_summary <- data_renamed |>
@@ -104,10 +109,9 @@ stock_summary |>
   
 ```
 
-
 This is all fine and dandy, but the stock price increase doesn't take into account inflation. I suspect that when we take into account the purchasing power of the dollar, some stocks will go into negative overall evaluation.
 
-If we take the 2010 US dollar as the default, in 2023, that same dollar would be worth ~$1.40, meaning that a person needs 40% more money in 2023 to have the same wealth as in 2010. I will take this value and incorporate it into the figure, so that, if the stock would follow inflation, it should be be worth that amount and compare that to the actual amount. This next plot shows the last known stock price and the inflation-adjusted price.
+If we take the 2010 US dollar as the default, in 2023, that same dollar would be worth \~\$1.40, meaning that a person needs 40% more money in 2023 to have the same wealth as in 2010. I will take this value and incorporate it into the figure, so that, if the stock would follow inflation, it should be be worth that amount and compare that to the actual amount. This next plot shows the last known stock price and the inflation-adjusted price.
 
 ```{r figure for stock price plus inflation}
 stock_summary_adjusted = stock_summary |> 
@@ -154,11 +158,13 @@ stock_summary_adjusted_normalized |>
 
 Now we see a more accurate picture, IBM's company evaluation actually shrank when adjusted for inflation, Intel's stayed the same.
 
-### Volatility
+## Volatility
 
 Volatility is the degree of fluctuations of a stock's evaluation. High volatility means the stock's price is unstable and can change quickly, while low volatility means that the price is stable. Stability can mean that the stock has the same value day-to-day, or that there is a steady downward or upward trend. Let's see how that looks among these companies.
 
-```{r Microsoft volatility}
+Firstly, I will look at only stock price changes:
+
+```{r  stock price change}
 #| fig-width: 10
 #| fig-height: 20
 ggplot(data_renamed, aes(x = date)) +
@@ -175,3 +181,181 @@ ggplot(data_renamed, aes(x = date)) +
 
 ```
 
+Volatility also has a formula, which is the annualized standard deviation of the stock's returns. It can be calculated like this:
+
+Return: stock price change from one period to the next, expressed as a percentage. For example, if a stock goes from \$100 to \$103, that is a 3% return.
+
+I expect 252 values for each company for a given year, which is the number of trading days in a year. Keep in mind that some companies were not traded throughout this period, like Tesla. -5 days is acceptable
+
+```{r trading days}
+data_renamed |>
+  mutate(year = lubridate::year(date)) |>
+  group_by(year, stock_symbol) |>
+  summarise(n_days = n(), .groups = "drop") |>
+  mutate(correct_n_days = n_days >= 247) |>
+  summarise(
+    n_true  = sum(correct_n_days),
+    n_false = sum(!correct_n_days)
+  )
+
+stock_days = data_renamed |>
+    mutate(year = lubridate::year(date)) |>
+    group_by(year, stock_symbol) |>
+    summarise(n_days = n(), .groups = "drop") |>
+    mutate(correct_n_days = n_days >= 247) |>
+    group_by(stock_symbol) |>
+    summarise(
+      all_years_correct = all(correct_n_days),
+      n_years_true      = sum(correct_n_days),
+      n_years_false     = sum(!correct_n_days),
+      total_years       = n()
+    ) |> 
+  select(stock_symbol,  all_years_correct, n_years_true)
+
+
+apa_table(
+  stock_days,
+  caption = "Summary of trading day data",
+  note = "A complete year requires at least 247 days."
+)
+```
+
+With this information, I am confident that I can calculate volatility.
+
+```{r volatility figure}
+#| fig-width: 10
+#| fig-height: 20
+data_returns = data_renamed |> 
+  mutate(year = lubridate::year(date)) |>
+  group_by(stock_symbol) |> 
+  arrange(date) |> 
+  mutate(return = (market_open - lag(market_open)) / lag(market_open))
+
+data_volatility <-
+  data_returns |>
+    group_by(stock_symbol) |>
+    mutate(
+      vol_30 = slide_dbl(
+        return,
+        ~ sd(.x, na.rm = TRUE),
+        .before = 29,
+        .complete = TRUE
+      ) * sqrt(252)
+    )
+
+data_volatility |>
+  ggplot(aes(x = date, y = vol_30, color = stock_symbol)) +
+  geom_line() +
+  labs(
+    title = "30-Day Rolling Annualized Volatility",
+    y = "Volatility",
+    x = "Date"
+  ) +
+  theme_apa() +
+  theme(legend.position = "none",
+        axis.title.x = element_blank()) +
+  facet_wrap(~ stock_symbol, scales = "free_y", ncol = 3)
+```
+
+There is an interesting spike around the beginning of 2020, I want to investigate that.
+
+```{r highest volatility}
+#| fig-width: 10
+#| fig-height: 20
+data_volatility |>
+  filter(date >= "2020-01-01" & date <= "2020-06-30") |> 
+   mutate(highest_volatility_date = date[which.max(vol_30)],
+          highest_volatility = max(vol_30, na.rm = TRUE)) |> 
+  ggplot(aes(x = date, y = vol_30, color = stock_symbol)) +
+   geom_text(
+    aes(x = highest_volatility_date, y = highest_volatility, label = highest_volatility_date),
+    vjust = -0.25,
+    hjust = -0.25,
+    color = "red",
+    size = 4
+   ) +
+  geom_line() +
+  labs(
+    title = "30-Day Rolling Annualized Volatility",
+    y = "Volatility",
+    x = "Date"
+  ) +
+  theme_apa() +
+  ylim(0, 1.7) +
+  theme(legend.position = "none",
+        axis.title.x = element_blank()) +
+  facet_wrap(~ stock_symbol, scales = "free_y", ncol = 3)
+```
+
+COVID-19 was declared a pandemic in March 2020, several market indexes dropped, in the US there were talks about stimulus introduction, and the heavy reliance on fragile markets in the tech sector all lead to high volatility during this time.
+
+## Daily fluctuations
+
+Finally, let's look at daily fluctuations for the stocks, which can be analysed with the **high** and **low** variables.
+
+While daily changes, otherwise known as intraday volatility, are not important for long-term analysis as sharp spike get smoothed down over time, it might be interesting to see big peaks and connect them to real life events.
+
+Let's calculate intraday volatility.
+
+```{r  intraday volatility figure}
+#| fig-width: 10
+#| fig-height: 20
+data_intraday = data_renamed |> 
+  mutate(intraday_volatility = (high - low)/market_open)
+
+data_intraday |>
+  ggplot(aes(x = date, y = intraday_volatility, color = stock_symbol)) +
+  geom_line() +
+  labs(
+    title = "Intraday Volatility",
+    y = "Volatility",
+    x = "Date"
+  ) +
+  theme_apa() +
+  ylim(0, 0.3) +
+  theme(legend.position = "none",
+        axis.title.x = element_blank()) +
+  facet_wrap(~ stock_symbol, scales = "free_y", ncol = 3)
+
+```
+
+It seems that Tesla has the highest intraday volatility among these companies, but let's look at the averages.
+
+```{r intraday volatility table}
+data_intraday_summary <- data_intraday |>
+  group_by(stock_symbol) |>
+  summarise(
+    intraday_volatility_average = round(mean(intraday_volatility, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) |>
+  arrange(intraday_volatility_average)
+
+
+apa_table(
+  data_intraday_summary,
+  digits = 3,
+  caption = "Average intraday volatility"
+)
+```
+
+# Final data
+
+I will create and save the final dataset, which will be used for the time-series analysis.
+
+```{r save data}
+data_final = data_renamed |> 
+  mutate(year = lubridate::year(date)) |>
+  group_by(stock_symbol) |> 
+  mutate(intraday_volatility = (high - low)/market_open) |> 
+  mutate(return = (market_open - lag(market_open)) / lag(market_open)) |> 
+  mutate(
+      vol_30 = slide_dbl(
+        return,
+        ~ sd(.x, na.rm = TRUE),
+        .before = 29,
+        .complete = TRUE
+      ) * sqrt(252)
+    )
+  
+write.csv(data_final, here::here("data/analysis_data.csv"))
+```
