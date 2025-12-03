@@ -1,0 +1,126 @@
+---
+title: "data_analysis"
+author: "Dominik Dianovics"
+format: html
+editor: visual
+---
+
+# R course final project
+
+## Tidy Tuesday: 2023-02-07, Big Tech Stock Prices
+
+This is the final project required for Tamas Nagy's R course, 2025 fall. This file contains the data analysis.
+
+Source of Tidy Tuesday data: https://github.com/rfordatascience/tidytuesday/tree/main/data/2023/2023-02-07
+
+## Load packages
+
+```{r packages}
+#| warning: false
+library(tidyverse)
+library(papaja)
+library(ggplot2)
+library(here)
+library(tsibble)
+library(feasts)
+library(imputeTS)
+library(tseries)
+library(vars)
+
+
+here::here()
+```
+
+## Load data
+
+```{r data}
+data = read.csv(here("data/analysis_data.csv"))
+
+summary(data)
+
+data = data |> 
+  mutate(date = as.Date(date))
+```
+
+## Impute missing data
+
+```{r}
+data_imputed <- data %>%
+  group_by(stock_symbol) %>%
+  mutate(
+    open  = na_kalman(market_open),
+    high  = na_kalman(high),
+    low   = na_kalman(low),
+    close = na_kalman(market_close),
+    final_close = na_kalman(final_close),
+    volume = na_kalman(volume)
+  ) %>%
+  ungroup()
+```
+
+## Convert to time series object
+
+```{r}
+ts_list <- data_imputed %>%
+  arrange(stock_symbol, date) %>%
+  group_by(stock_symbol) %>%
+  group_split() %>%
+  setNames(unique(data_imputed$stock_symbol)) %>%   # name each list element by stock
+  map(function(df) {
+    mat <- as.matrix(df[, c("open", "high", "low", "close", "final_close", "volume")])
+    ts(mat, frequency = 365)   # daily data
+  })
+```
+
+```{r}
+adf.test(ts_list$AAPL[,"close"])
+```
+
+```{r}
+acf(ts_list$AAPL[,"close"], lag.max = 365)
+pacf(ts_list$AAPL[,"close"], lag.max = 365)
+apply(ts_list$AAPL, 2, acf)
+
+for (stk in names(ts_list)) {
+  cat("\n---", stk, "---\n")
+  print(acf(ts_list[[stk]][,"close"], plot = TRUE))
+  print(pacf(ts_list[[stk]][,"close"], plot = TRUE))
+}
+
+```
+
+```{r}
+fit <- arima(ts_list$AAPL[,"close"], order=c(1,1,1))
+
+varfit <- VAR(ts_list$AAPL, p = 1)
+summary(varfit)
+
+
+ts_returns <- diff(log(ts_list$AAPL))
+ts_returns <- ts_returns[-1,]
+cor(ts_returns)
+varfit <- VAR(ts_returns, p = 1)
+summary(varfit)
+
+
+plot(ts_list$AAPL)
+
+stl = stl(ts_list$AAPL[,"final_close"], s.window = "periodic")
+stl
+plot(stl)
+
+
+AAPL_df <- data_imputed %>%
+  filter(stock_symbol == "AAPL") %>%
+  dplyr::select(date, final_close)
+
+tsibble_data <- as_tsibble(AAPL_df, index = date)
+
+tsibble_data %>%
+  model(STL(final_close ~ trend())) %>% 
+  components() %>%
+  autoplot()
+
+
+```
+
