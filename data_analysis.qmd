@@ -26,6 +26,9 @@ library(feasts)
 library(imputeTS)
 library(tseries)
 library(vars)
+library(zoo)
+library(forecast)
+library(ggfortify)
 
 
 here::here()
@@ -42,85 +45,197 @@ data = data |>
   mutate(date = as.Date(date))
 ```
 
-## Impute missing data
-
-```{r}
-data_imputed <- data %>%
-  group_by(stock_symbol) %>%
-  mutate(
-    open  = na_kalman(market_open),
-    high  = na_kalman(high),
-    low   = na_kalman(low),
-    close = na_kalman(market_close),
-    final_close = na_kalman(final_close),
-    volume = na_kalman(volume)
-  ) %>%
-  ungroup()
-```
-
 ## Convert to time series object
 
-```{r}
-ts_list <- data_imputed %>%
-  arrange(stock_symbol, date) %>%
-  group_by(stock_symbol) %>%
-  group_split() %>%
-  setNames(unique(data_imputed$stock_symbol)) %>%   # name each list element by stock
-  map(function(df) {
-    mat <- as.matrix(df[, c("open", "high", "low", "close", "final_close", "volume")])
-    ts(mat, frequency = 365)   # daily data
-  })
-```
+Time series analysis requires a special object type, I create that here. Each variable will have its own time series object.
 
 ```{r}
-adf.test(ts_list$AAPL[,"close"])
-```
-
-```{r}
-acf(ts_list$AAPL[,"close"], lag.max = 365)
-pacf(ts_list$AAPL[,"close"], lag.max = 365)
-apply(ts_list$AAPL, 2, acf)
-
-for (stk in names(ts_list)) {
-  cat("\n---", stk, "---\n")
-  print(acf(ts_list[[stk]][,"close"], plot = TRUE))
-  print(pacf(ts_list[[stk]][,"close"], plot = TRUE))
-}
+stocks_ts <- data |>
+  arrange(stock_symbol, date) |>
+  as_tsibble(key = stock_symbol, index = date)
 
 ```
 
+## Visualizing daily log returns
+
 ```{r}
-fit <- arima(ts_list$AAPL[,"close"], order=c(1,1,1))
+#| fig-width: 10
+#| fig-height: 20
+#| 
+stocks_ts |>
+  ggplot(aes(x = date, y = return)) +
+  geom_line() +
+  facet_wrap(~ company, scales = "free_y") +
+  labs(title = "Daily Log Returns per Company",
+       y = "Log Return", 
+       x = "Date") +
+  theme_apa() +
+  ylim(-0.25, 0.25) +
+  facet_wrap(~ stock_symbol, scales = "free_y", axes = "all_y", ncol = 2)
+```
 
-varfit <- VAR(ts_list$AAPL, p = 1)
-summary(varfit)
+## Visualizing opening prices
 
+```{r}
+ggplot(stocks_ts, aes(date, market_open, color = stock_symbol)) +
+  geom_line() +
+  facet_wrap(~ stock_symbol, scales = "free_y", ncol = 3) +
+  labs(title = "Market Open Price per Company") +
+  theme_apa() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank(),
+        legend.position = "none"
+  )
+```
 
-ts_returns <- diff(log(ts_list$AAPL))
-ts_returns <- ts_returns[-1,]
-cor(ts_returns)
-varfit <- VAR(ts_returns, p = 1)
-summary(varfit)
+## Using Apple Inc.
 
+I will do a simple time series analyis using Apple stock's log returns. First, let's create the data subset.
 
-plot(ts_list$AAPL)
+```{r}
+aapl <- data |>
+  filter(stock_symbol == "AAPL") |>
+  arrange(date) |>
+  as_tsibble(index = date) |> 
+  filter(!is.na(return)) |> 
+  dplyr::select(date, return)
+```
 
-stl = stl(ts_list$AAPL[,"final_close"], s.window = "periodic")
-stl
-plot(stl)
+Looking at Apple stock log returns specifically.
 
+```{r}
+ggplot(aapl, aes(x = date, y = return, color = return)) +
+  geom_line() +
+  labs(title = "AAPL Daily Log Returns", y = "Log return", x = "Date") +
+  scale_color_viridis_b() +
+  theme_apa() +
+  theme(legend.position = "none")
+```
 
-AAPL_df <- data_imputed %>%
-  filter(stock_symbol == "AAPL") %>%
-  dplyr::select(date, final_close)
+## Assumptions
 
-tsibble_data <- as_tsibble(AAPL_df, index = date)
+To do a time series analysis properly, we need to check certain assumptions.
 
-tsibble_data %>%
-  model(STL(final_close ~ trend())) %>% 
-  components() %>%
-  autoplot()
+### Autocorrelation
 
+Autocorrelation terms give the correlation between values next to each other, called lagged values. A high autocorrelation means that time n-1 has a high effect on time n.
+
+```{r}
+stats::acf(aapl$return, lag.max = 365, na.action = na.pass, main = "ACF of AAPL returns")
+stats::pacf(aapl$return, lag.max = 365, main = "PACF of AAPL returns")
+```
+
+There is no autocorrelation or partial autocorrelation in log returns, meaning that the change in stock price of the previous day does not tell us anything about the change in stock price for the given day.
+
+### Stationarity
+
+Stationarity assumes that the data has a constant mean and variance over time. The augmented Dickey-Fuller (ADF) test checks this.
+
+```{r}
+adf_test <- ur.df(aapl$return, type = "drift", selectlags = "AIC")
+summary(adf_test)
+```
+
+Two criteria are important here, the p value and the critical value, both of which indicate no violation of stationarity.
+
+## Fitting the model
+
+I will fit a simple (1,0,1) ARIMA model.
+
+Explaining the terms and the decisions behind them.
+
+ARIMA refers to
+
+1.  autoregressive
+
+2.  integrated
+
+3.  moving average,
+
+The first number (1) refers to the autoregressive, meaning the number of past values to predict with, in this case, the simplest is one.
+The second number (0) refers to a calculation if data is non-stationary, that is not the case here.
+The third number (1) refers to the number of residuals used to predict the current value.
+
+```{r}
+fit <- stats::arima(aapl$return, order = c(1,0,1))  # ARIMA(1,0,1) example
+summary(fit)
 
 ```
 
+The model fit indices are: 
+AIC = -16716
+logLikelihood = 8362
+
+These, on their own, do not tell us a lot about model fit, but they will be used later to compare other models
+
+Coefficients:
+ar1 = -0.05
+ma = -0.05
+
+The model performs poorly, meaning that the returns of the previous day and the errors of the previous day have little to no predictive value. This is as expected, otherwise financial analysts (or anyone with this much skill) can predict the market and make a profit.
+
+### Looking at residuals
+
+```{r}
+residuals_fit <- residuals(fit)
+plot(residuals_fit, type = "l", main = paste("Apple", "ARIMA Residuals"))
+
+stats::acf(residuals_fit, main = paste("Apple", "Residual ACF"))
+stats::pacf(residuals_fit, main = paste("Apple", "Residual PACF"))
+
+hist(residuals_fit, breaks = 30, main = paste("Apple", "Residual Histogram"), xlab = "Residuals")
+```
+
+Residuals are normally distributed and there is not a lot of residual correlation left that can be integrated into a new model.
+
+## Modeling stock prices: Nvidia
+
+Stock prices tend upward and have a very high autocorrelation with lagged prices. This makes most approaches unavailable, but we can still try to look at trends and seasonality, if we fill in the missing values. We will only look at stocks that have been on the stock market for the whole data range.
+
+### Imputing missing data
+
+```{r}
+data_nvda <- data |>
+  filter(stock_symbol == "NVDA") |>
+  dplyr::select(date, market_close) |>
+  arrange(date)
+
+full_dates <- seq(min(data_nvda$date), max(data_nvda$date), by = "day")
+data_complete <- tibble(date = full_dates) |>
+  left_join(data_nvda, by = "date") |>
+  arrange(date)
+
+data_complete$market_close <- na.approx(data_complete$market_close)
+```
+
+## Creating the STL decomposition
+
+With STL, we can see trends, seasonality, and random noise separately.
+
+```{r}
+#| fig-width: 6
+#| fig-height: 8
+#| 
+
+price_ts <- ts(data_complete$market_close, frequency = 252)
+
+stl_result <- stl(price_ts, s.window = "periodic")
+
+stl_zoo <- zoo(stl_result$time.series, order.by = data_complete$date)
+
+stl_plot <- autoplot(stl_zoo) +
+  ggtitle("STL Decomposition of NVDA Log Prices") +
+  xlab("Time") +
+  ylab("Price") +
+  theme_classic(base_size = 12) + 
+  theme(
+    plot.title = element_text(face = "bold"), 
+    axis.title = element_text(face = "bold")
+  )
+
+stl_plot
+
+```
+
+The trend is substantially more pronounced than the seasonality, but that is as expected, because days and months of a year do not dictate market fluctuations.

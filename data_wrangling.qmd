@@ -50,7 +50,7 @@ data_renamed = data_symbol |>
     market_close = close,
     final_close = adj_close
   ) |> 
-  select(company, stock_symbol, date, market_open, market_close, final_close, low, high, volume)
+  dplyr::select(company, stock_symbol, date, market_open, market_close, final_close, low, high, volume)
 ```
 
 Dataset contains **`r nrow(data_renamed)`** rows for these companies: **`r unique(data_renamed$company)`**.
@@ -210,7 +210,7 @@ stock_days = data_renamed |>
       n_years_false     = sum(!correct_n_days),
       total_years       = n()
     ) |> 
-  select(stock_symbol,  all_years_correct, n_years_true)
+  dplyr::select(stock_symbol,  all_years_correct, n_years_true)
 
 
 apa_table(
@@ -347,7 +347,7 @@ data_final = data_renamed |>
   mutate(year = lubridate::year(date)) |>
   group_by(stock_symbol) |> 
   mutate(intraday_volatility = (high - low)/market_open) |> 
-  mutate(return = (market_open - lag(market_open)) / lag(market_open)) |> 
+  mutate(return = log(market_open) - log(lag(market_open))) |> 
   mutate(
       vol_30 = slide_dbl(
         return,
